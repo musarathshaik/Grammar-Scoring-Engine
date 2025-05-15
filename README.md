@@ -10,7 +10,6 @@ The goal of this project is to develop a model that evaluates the grammatical qu
 Your dataset should include:
 
 ### `train.csv`
-```csv
 
 filename,label
 sample1.wav,4.5
@@ -44,10 +43,8 @@ A regression model (e.g., Random Forest, XGBoost) predicts grammar scores based 
 🧰 Dependencies
 Install all required packages via:
 
-bash
-Copy
-Edit
 pip install -r requirements.txt
+
 Key Libraries:
 
 whisper or SpeechRecognition
@@ -59,10 +56,10 @@ pandas, numpy, scikit-learn
 matplotlib, seaborn
 
 🚀 Usage
-bash
-Copy
-Edit
+
+
 # 1. Transcribe audio
+
 python transcribe.py
 
 # 2. Extract grammar features
@@ -70,10 +67,13 @@ python extract_features.py
 
 # 3. Train & evaluate the grammar scoring model
 python train_model.py
+
 📊 Output
+
 The model predicts a grammar score (0–5) for each sample. You can visualize prediction performance with scatter plots, MAE, or RMSE.
 
 🧠 Future Improvements
+
 Improve transcription accuracy using fine-tuned ASR models.
 
 Include fluency and prosody-based features.
