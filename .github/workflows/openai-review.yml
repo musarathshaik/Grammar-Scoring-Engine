@@ -1,23 +1,157 @@
 name: AI Code Review
 
-permissions:
-  contents: read
-  pull-requests: write
-
 on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   review:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+    env:
+      GITHUB_API_URL: https://api.github.com
 
-      - uses: x86nick/openai-pr-reviewer@main
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run AI code reviewer (fetch diff, call OpenAI, post comment)
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          debug: false
-          review_comment_lgtm: false
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import os, json, urllib.request, urllib.parse, sys, textwrap
+
+          # Helpers
+          def gh_api_get(url, token, accept=None):
+            req = urllib.request.Request(url, headers={
+              "Authorization": f"token {token}",
+              "User-Agent": "github-actions-openai-bot",
+              **({"Accept": accept} if accept else {})
+            })
+            return urllib.request.urlopen(req).read()
+
+          def gh_api_post(url, token, data):
+            req = urllib.request.Request(url, data=json.dumps(data).encode('utf-8'), headers={
+              "Authorization": f"token {token}",
+              "User-Agent": "github-actions-openai-bot",
+              "Accept": "application/vnd.github+json",
+              "Content-Type": "application/json"
+            }, method="POST")
+            return urllib.request.urlopen(req).read()
+
+          def openai_chat_completion(api_key, messages, model="gpt-4o-mini"):
+            payload = {
+              "model": model,
+              "messages": messages,
+              "temperature": 0.2,
+              "max_tokens": 1500
+            }
+            req = urllib.request.Request("https://api.openai.com/v1/chat/completions",
+              data=json.dumps(payload).encode('utf-8'),
+              headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+              })
+            return json.loads(urllib.request.urlopen(req).read())
+
+          # Read environment
+          token = os.environ.get("GITHUB_TOKEN")
+          openai_key = os.environ.get("OPENAI_API_KEY")
+          event_path = os.environ.get("GITHUB_EVENT_PATH")
+          repo = os.environ.get("GITHUB_REPOSITORY")
+
+          if not (token and openai_key and event_path and repo):
+            print("Missing required environment variables (GITHUB_TOKEN, OPENAI_API_KEY, GITHUB_EVENT_PATH, GITHUB_REPOSITORY).")
+            sys.exit(1)
+
+          # Load event to get PR number
+          with open(event_path, 'r', encoding='utf-8') as f:
+            event = json.load(f)
+
+          pr = event.get("pull_request") or {}
+          pr_number = pr.get("number")
+          pr_title = pr.get("title", "")
+          pr_body = pr.get("body", "")
+
+          if not pr_number:
+            print("No pull_request number found in event payload. Exiting.")
+            sys.exit(0)
+
+          print(f"PR number: {pr_number}")
+
+          # Fetch PR diff (raw)
+          diff_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}"
+          try:
+            # Use Accept header to request the diff/subtle text if needed; we will craft the URL with .diff via the API endpoint
+            diff_req = urllib.request.Request(diff_url, headers={
+              "Authorization": f"token {token}",
+              "User-Agent": "github-actions-openai-bot",
+              "Accept": "application/vnd.github.v3.diff"
+            })
+            pr_diff = urllib.request.urlopen(diff_req).read().decode('utf-8', errors='replace')
+          except Exception as e:
+            print("Failed to fetch PR diff:", e)
+            pr_diff = ""
+
+          if not pr_diff:
+            pr_diff = "(no diff available)"
+
+          # Trim diff to a safe length to avoid very large payloads
+          MAX_CHARS = 30000
+          if len(pr_diff) > MAX_CHARS:
+            pr_diff = pr_diff[:MAX_CHARS] + "\n\n[diff truncated]"
+
+          # Build prompt messages for OpenAI
+          system_msg = {
+            "role": "system",
+            "content": (
+              "You are an expert software engineer and code reviewer. "
+              "Given a pull request diff and metadata, produce a clear review: summary of changes, "
+              "potential bugs/security issues, style/consistency suggestions, and actionable code comments. "
+              "Output should be friendly and concise. If the diff is large, prioritize high-risk changes."
+            )
+          }
+          user_msgs = [
+            {"role": "user", "content": f"PR title: {pr_title}\n\nPR description: {pr_body}\n\nPlease review the following diff and provide actionable comments:\n\n{pr_diff}"}
+          ]
+
+          print("Sending request to OpenAI...")
+          try:
+            resp = openai_chat_completion(openai_key, [system_msg] + user_msgs)
+          except Exception as e:
+            print("OpenAI API call failed:", e)
+            sys.exit(1)
+
+          # Extract assistant text
+          try:
+            assistant_text = resp["choices"][0]["message"]["content"].strip()
+          except Exception as e:
+            print("Failed to parse OpenAI response:", e)
+            print(json.dumps(resp))
+            assistant_text = "OpenAI returned an unexpected response."
+
+          # Post a comment to the PR
+          comment_url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
+          comment_body = {
+            "body": f"**Automated AI PR Review**\n\n{assistant_text}\n\n---\n*This comment was generated by an automated GitHub Action using OpenAI.*"
+          }
+
+          try:
+            print("Posting comment to PR...")
+            result = gh_api_post(comment_url, token, comment_body)
+            print("Comment posted.")
+          except Exception as e:
+            print("Failed to post comment to PR:", e)
+            sys.exit(1)
+
+          # Print final output (for logs)
+          print("AI review:")
+          print(assistant_text)
+          PY
